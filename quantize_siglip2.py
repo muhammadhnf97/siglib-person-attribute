@@ -27,7 +27,7 @@ Usage (run inside the `closure` conda env):
     conda run -n closure python quantize_siglip2.py \\
         --checkpoint /path/to/best.pt \\
         --export-dir /path/to/dataset/export \\
-        --config /path/to/dataset-collector/server/template/siglip2/siglip2_person_attribute/config.yaml \\
+        --config /path/to/export/config.yaml \\
         --output-dir /path/to/runs/quantized \\
         --mode fp16
 """

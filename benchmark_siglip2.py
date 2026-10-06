@@ -19,14 +19,9 @@ from __future__ import annotations
 
 import argparse
 import statistics
-import sys
 import time
 from pathlib import Path
 
-# Reuse the collector's real inference path so numbers match production.
-sys.path.insert(
-    0, "/home/me/disk-256/00_RND_MODELS/paddlepaddle/dataset-collector/server"
-)
 import torch
 
 import siglip2_infer
@@ -48,7 +43,7 @@ def main():
     )
     parser.add_argument(
         "--model-dir", required=True, type=Path,
-        help="Directory containing best.pt/last.pt (as under template/.../model/)",
+        help="Dir with best.pt/last.pt/fp16.pt/int8-dynamic.pt, or a direct .pt path",
     )
     parser.add_argument(
         "--images-dir", required=True, type=Path,
@@ -71,6 +66,8 @@ def main():
         raise SystemExit(f"No images found in {args.images_dir}")
     print(f"{len(images)} unique images available; cycling as needed")
 
+    ckpt = siglip2_infer.find_checkpoint_file(args.model_dir)
+    print(f"checkpoint: {ckpt}")
     predictor = siglip2_infer.load_predictor(args.model_dir)
     model, processor, groups, device = predictor
     dtype = next(model.parameters()).dtype

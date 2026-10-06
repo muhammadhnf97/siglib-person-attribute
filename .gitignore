@@ -1,9 +1,15 @@
 __pycache__/
 *.pyc
 
-# Datasets / exported splits
+# Datasets / exported splits (dirs holding train/validation/test images)
 gender-age-*/
+person-attribute-*/
 jjpetshop-*.tar
+*.jpg
+*.jpeg
+*.png
+*.webp
+metadata.jsonl
 
 # Training runs / checkpoints
 siglip2-runs/

@@ -72,7 +72,7 @@ projection for `--project` images (default 10k).
 
 ```bash
 conda run -n closure python /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/benchmark_siglip2.py \
-  --model-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/dataset-collector/server/template/siglip2/siglip2_person_attribute/model/person-attribute-2-fp16 \
+  --model-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/siglip2-runs/person-attribute-2-quant \
   --images-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/person-attribute-2/test \
   --num-images 300
 ```

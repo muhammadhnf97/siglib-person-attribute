@@ -21,7 +21,7 @@ Usage (run inside the `closure` conda env):
 
     conda run -n closure python train_siglip2_attributes.py \\
         --export-dir /path/to/dataset/export \\
-        --config /path/to/dataset-collector/server/template/siglip2/siglip2_person_attribute/config.yaml \\
+        --config /path/to/export/config.yaml \\
         --output-dir /path/to/runs/person_attribute \\
         --epochs 15 --batch-size 32
 
