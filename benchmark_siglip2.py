@@ -45,11 +45,24 @@ def fmt_duration(seconds: float) -> str:
 
 
 def find_models(model_dir: Path) -> list[Path]:
-    """Resolve --model-dir into a list of checkpoint-holding paths."""
+    """Resolve --model-dir into a list of checkpoint paths/dirs to benchmark.
+
+    A dir holding several checkpoint files (e.g. a quantize output with both
+    fp16.pt and int8-dynamic.pt) benchmarks each file — they differ in speed.
+    last.pt is skipped when best.pt exists since same-arch weights benchmark
+    identically for latency.
+    """
     if model_dir.is_file():
         return [model_dir]
-    if siglip2_infer.find_checkpoint_file(model_dir):
-        return [model_dir]
+    ckpt_files = [
+        model_dir / n
+        for n in ("best.pt", "fp16.pt", "int8-dynamic.pt")
+        if (model_dir / n).is_file()
+    ]
+    if not ckpt_files and (model_dir / "last.pt").is_file():
+        ckpt_files = [model_dir / "last.pt"]
+    if ckpt_files:
+        return ckpt_files
     return sorted(
         d for d in model_dir.iterdir()
         if d.is_dir() and siglip2_infer.find_checkpoint_file(d)
@@ -175,7 +188,10 @@ def main():
 
     results = []
     for m in models:
-        results.append(run_benchmark(m.name, m, images, args))
+        label = m.stem if m.is_file() else m.name
+        if m.is_file() and m.stem in ("best", "last"):
+            label = f"{m.parent.name}/{m.name}"
+        results.append(run_benchmark(label, m, images, args))
 
     if len(results) > 1:
         print("\n=== comparison (sequential, batch=1) ===")
