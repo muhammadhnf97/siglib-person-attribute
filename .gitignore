@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+
+# Datasets / exported splits
+gender-age-*/
+jjpetshop-*.tar
+
+# Training runs / checkpoints
+siglip2-runs/
+*.pt
+*.onnx

@@ -1,0 +1,6 @@
+# Extra deps for train_siglip2_attributes.py, on top of what's already in
+# the `closure` conda env (torch + torchvision with CUDA).
+# Install with: conda run -n closure pip install -r requirements-train.txt
+transformers==4.55.2
+pillow>=10.0
+pyyaml>=6.0
