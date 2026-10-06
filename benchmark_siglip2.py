@@ -8,16 +8,23 @@ checkpoints). Runs N sequential inferences in chunks so you can see whether
 throughput degrades under sustained load, then projects wall-clock time for
 a larger image count.
 
+`--model-dir` accepts:
+  - a single .pt file,                          -> benchmarks that checkpoint
+  - a dir holding a checkpoint (best.pt etc.),  -> benchmarks it
+  - a dir holding model subdirs (e.g. template/ -> benchmarks every model in
+    <template>/model/),                            it and prints a comparison
+
 Usage (run inside the `closure` conda env):
 
     conda run -n closure python benchmark_siglip2.py \\
-        --model-dir /path/to/template/model/<name> \\
+        --model-dir /path/to/template/siglip2_person_attribute/model \\
         --images-dir /path/to/some/image/dir \\
         --num-images 300 --warmup 10
 """
 from __future__ import annotations
 
 import argparse
+import gc
 import statistics
 import time
 from pathlib import Path
@@ -37,44 +44,28 @@ def fmt_duration(seconds: float) -> str:
     return f"{seconds / 3600:.2f}h"
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+def find_models(model_dir: Path) -> list[Path]:
+    """Resolve --model-dir into a list of checkpoint-holding paths."""
+    if model_dir.is_file():
+        return [model_dir]
+    if siglip2_infer.find_checkpoint_file(model_dir):
+        return [model_dir]
+    return sorted(
+        d for d in model_dir.iterdir()
+        if d.is_dir() and siglip2_infer.find_checkpoint_file(d)
     )
-    parser.add_argument(
-        "--model-dir", required=True, type=Path,
-        help="Dir with best.pt/last.pt/fp16.pt/int8-dynamic.pt, or a direct .pt path",
-    )
-    parser.add_argument(
-        "--images-dir", required=True, type=Path,
-        help="Directory of images to feed the model (cycles if fewer than --num-images)",
-    )
-    parser.add_argument("--num-images", type=int, default=300,
-                        help="Inference calls to time (default 300)")
-    parser.add_argument("--warmup", type=int, default=10,
-                        help="Untimed warmup inferences (default 10)")
-    parser.add_argument("--chunk", type=int, default=50,
-                        help="Print per-chunk throughput every N images (default 50)")
-    parser.add_argument("--project", type=int, default=10000,
-                        help="Image count to project total wall-clock for (default 10000)")
-    args = parser.parse_args()
 
-    images = sorted(
-        p for p in args.images_dir.iterdir() if p.suffix.lower() in IMG_EXTS
-    )
-    if not images:
-        raise SystemExit(f"No images found in {args.images_dir}")
-    print(f"{len(images)} unique images available; cycling as needed")
 
-    ckpt = siglip2_infer.find_checkpoint_file(args.model_dir)
-    print(f"checkpoint: {ckpt}")
-    predictor = siglip2_infer.load_predictor(args.model_dir)
+def run_benchmark(name, model_path, images, args):
+    predictor = siglip2_infer.load_predictor(model_path)
     model, processor, groups, device = predictor
     dtype = next(model.parameters()).dtype
+    print(f"\n=== {name} ===")
+    print(f"checkpoint: {siglip2_infer.find_checkpoint_file(model_path)}")
     print(f"device={device} dtype={dtype} heads={[g['name'] for g in groups]}")
 
-    # predict_values maps checkpoint group outputs into a template's index
-    # layout — rebuild an equivalent layout so benchmark calls the real path.
+    # predict_values maps checkpoint group outputs into an index layout —
+    # rebuild an equivalent one so the benchmark calls the real path.
     attr_groups = []
     offset = 0
     for g in groups:
@@ -94,7 +85,6 @@ def main():
         run_one(i)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
-    print(f"warmup done ({args.warmup} imgs); timing {args.num_images} inferences\n")
 
     latencies = []
     t_start = time.perf_counter()
@@ -112,26 +102,94 @@ def main():
             )
 
     total = time.perf_counter() - t_start
-    mean_ms = statistics.mean(latencies) * 1000
     sorted_l = sorted(latencies)
-    p50 = statistics.median(sorted_l) * 1000
-    p95 = sorted_l[int(len(sorted_l) * 0.95)] * 1000
-    p99 = sorted_l[int(len(sorted_l) * 0.99)] * 1000
     per_img = total / args.num_images
+    peak_mib = (
+        torch.cuda.max_memory_allocated() / 1024**2 if device.type == "cuda" else None
+    )
 
-    print("\n=== per-image latency (sequential, batch=1) ===")
-    print(f"  mean {mean_ms:.1f} ms | p50 {p50:.1f} | p95 {p95:.1f} | p99 {p99:.1f}")
-    print(f"  min  {sorted_l[0] * 1000:.1f} ms | max {sorted_l[-1] * 1000:.1f} ms")
-    print(f"\n=== throughput ===")
-    print(f"  {args.num_images} images in {fmt_duration(total)} ({1 / per_img:.2f} img/s)")
-    print(f"  projection for {args.project:,} images: {fmt_duration(per_img * args.project)}")
+    print(
+        f"  mean {statistics.mean(latencies) * 1000:.1f} ms"
+        f" | p50 {statistics.median(sorted_l) * 1000:.1f}"
+        f" | p95 {sorted_l[int(len(sorted_l) * 0.95)] * 1000:.1f}"
+        f" | p99 {sorted_l[int(len(sorted_l) * 0.99)] * 1000:.1f}"
+        f" | min {sorted_l[0] * 1000:.1f} | max {sorted_l[-1] * 1000:.1f} ms"
+    )
+    print(
+        f"  {1 / per_img:.2f} img/s | {args.project:,} imgs ->"
+        f" {fmt_duration(per_img * args.project)}"
+    )
+    if peak_mib is not None:
+        print(f"  peak VRAM: {peak_mib:.0f} MiB")
+
+    del model, predictor
+    gc.collect()
     if device.type == "cuda":
-        print(
-            f"  peak VRAM: {torch.cuda.max_memory_allocated() / 1024**2:.0f} MiB"
-            f" allocated, {torch.cuda.max_memory_reserved() / 1024**2:.0f} MiB reserved"
-        )
-    print("\nThroughput hint: chunk avgs above flag degradation — if later chunks")
-    print("get steadily slower, sustained load is throttling the model.")
+        torch.cuda.empty_cache()
+
+    return {
+        "name": name,
+        "device": str(device),
+        "dtype": str(dtype).replace("torch.", ""),
+        "mean_ms": statistics.mean(latencies) * 1000,
+        "p95_ms": sorted_l[int(len(sorted_l) * 0.95)] * 1000,
+        "img_s": 1 / per_img,
+        "proj": per_img * args.project,
+        "peak_mib": peak_mib,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--model-dir", required=True, type=Path,
+        help="Checkpoint file, model dir, or parent dir of model dirs (runs all)",
+    )
+    parser.add_argument(
+        "--images-dir", required=True, type=Path,
+        help="Directory of images to feed the model (cycles if fewer than --num-images)",
+    )
+    parser.add_argument("--num-images", type=int, default=300,
+                        help="Inference calls to time per model (default 300)")
+    parser.add_argument("--warmup", type=int, default=10,
+                        help="Untimed warmup inferences per model (default 10)")
+    parser.add_argument("--chunk", type=int, default=50,
+                        help="Print per-chunk throughput every N images (default 50)")
+    parser.add_argument("--project", type=int, default=10000,
+                        help="Image count to project total wall-clock for (default 10000)")
+    args = parser.parse_args()
+
+    images = sorted(
+        p for p in args.images_dir.iterdir() if p.suffix.lower() in IMG_EXTS
+    )
+    if not images:
+        raise SystemExit(f"No images found in {args.images_dir}")
+
+    models = find_models(args.model_dir)
+    if not models:
+        raise SystemExit(f"No checkpoints found under {args.model_dir}")
+    print(f"{len(images)} unique images; benchmarking {len(models)} model(s): "
+          + ", ".join(m.name for m in models))
+
+    results = []
+    for m in models:
+        results.append(run_benchmark(m.name, m, images, args))
+
+    if len(results) > 1:
+        print("\n=== comparison (sequential, batch=1) ===")
+        print(f"{'model':<32} {'device':<5} {'dtype':<8} {'mean':>8} {'p95':>8}"
+              f" {'img/s':>7} {f'{args.project // 1000}k imgs':>9} {'VRAM':>7}")
+        for r in sorted(results, key=lambda r: -r["img_s"]):
+            vram = f"{r['peak_mib']:.0f}MiB" if r["peak_mib"] else "cpu"
+            print(
+                f"{r['name']:<32} {r['device']:<5} {r['dtype']:<8}"
+                f" {r['mean_ms']:>7.1f}ms {r['p95_ms']:>7.1f}ms"
+                f" {r['img_s']:>7.2f} {fmt_duration(r['proj']):>9} {vram:>7}"
+            )
+        print("\nThroughput hint: watch the per-chunk avgs above — steadily")
+        print("rising chunks mean the model throttles under sustained load.")
 
 
 if __name__ == "__main__":
