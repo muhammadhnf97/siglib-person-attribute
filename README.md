@@ -47,10 +47,10 @@ diff.
 
 ```bash
 conda run -n closure python /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/quantize_siglip2.py \
-  --checkpoint "$HOME/siglip2-runs/person-attribute-2/best.pt" \
+  --checkpoint /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/siglip2-runs/person-attribute-2/best.pt \
   --export-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/person-attribute-2 \
   --config /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/person-attribute-2/config.yaml \
-  --output-dir "$HOME/siglip2-runs/person-attribute-2-quant" \
+  --output-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/siglip2-runs/person-attribute-2-quant \
   --mode fp16
 ```
 
@@ -59,6 +59,27 @@ conda run -n closure python /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2
 - `--mode int8-dynamic`: ~3.5x smaller, CPU-only (PyTorch's dynamic-quant
   kernels have no GPU backend), small accuracy cost — only worth it if
   inference is moving off the GPU.
+
+## Benchmark (latency / stress test)
+
+Times the same code path `/prelabel` runs (load, preprocess, forward, argmax)
+— works on float32, fp16, and int8-dynamic checkpoints. `--images-dir` is just
+a source of real images to feed the model (labels are ignored; it cycles if
+the folder is smaller than `--num-images` — point it at a real batch for a
+representative run). Prints per-image latency stats, per-chunk throughput so
+you can spot degradation under sustained load, peak VRAM, and a wall-clock
+projection for `--project` images (default 10k).
+
+```bash
+conda run -n closure python /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/benchmark_siglip2.py \
+  --model-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/dataset-collector/server/template/siglip2/siglip2_person_attribute/model/person-attribute-2-fp16 \
+  --images-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/person-attribute-2/test \
+  --num-images 300
+```
+
+Measured on this machine (RTX 3080): fp16 ~11ms/img ≈ 89 img/s (~2min per
+10k images); int8-dynamic ~110ms/img ≈ 9 img/s (~18min per 10k) since it
+runs on CPU.
 
 ## Deploying to the collector for prelabeling
 
