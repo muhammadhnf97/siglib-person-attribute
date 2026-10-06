@@ -13,9 +13,9 @@ of space easily.
 
 ```bash
 conda run -n closure python /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/train_siglip2_attributes.py \
-  --export-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/gender-age-1 \
+  --export-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/person-attribute-2 \
   --config /home/me/disk-256/00_RND_MODELS/paddlepaddle/dataset-collector/server/template/siglip2/siglip2_person_attribute/config.yaml \
-  --output-dir "$HOME/siglip2-runs/gender-age-2" \
+  --output-dir "$HOME/siglip2-runs/person-attribute-2" \
   --checkpoint google/siglip2-base-patch16-224 \
   --epochs 15 --batch-size 32 --balanced-loss
 ```
@@ -38,10 +38,10 @@ diff.
 
 ```bash
 conda run -n closure python /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/quantize_siglip2.py \
-  --checkpoint "$HOME/siglip2-runs/gender-age-2/best.pt" \
-  --export-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/gender-age-1 \
+  --checkpoint "$HOME/siglip2-runs/person-attribute-2/best.pt" \
+  --export-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/person-attribute-2 \
   --config /home/me/disk-256/00_RND_MODELS/paddlepaddle/dataset-collector/server/template/siglip2/siglip2_person_attribute/config.yaml \
-  --output-dir "$HOME/siglip2-runs/gender-age-2-quant" \
+  --output-dir "$HOME/siglip2-runs/person-attribute-2-quant" \
   --mode fp16
 ```
 
