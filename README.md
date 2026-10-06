@@ -9,12 +9,21 @@ Run everything inside the `closure` conda env. Checkpoints are ~350MB
 (float32) — point `--output-dir` at `$HOME`, not `disk-256`, which runs out
 of space easily.
 
+`--config` tells the script which attribute groups to build heads for (names,
+option lists, how many classes each head has) — it's required, both scripts
+fail fast without it. The collector's `/datasets/{name}/export` now bundles
+the exact `config.yaml` that produced the export's `metadata.jsonl` labels
+right inside the export dir, so point `--config` at `<export-dir>/config.yaml`
+rather than back into `dataset-collector/server/template/...` — that way
+training always matches the config an export was actually made with, even if
+the live template gets edited later.
+
 ## Train
 
 ```bash
 conda run -n closure python /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/train_siglip2_attributes.py \
   --export-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/person-attribute-2 \
-  --config /home/me/disk-256/00_RND_MODELS/paddlepaddle/dataset-collector/server/template/siglip2/siglip2_person_attribute/config.yaml \
+  --config /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/person-attribute-2/config.yaml \
   --output-dir "$HOME/siglip2-runs/person-attribute-2" \
   --checkpoint google/siglip2-base-patch16-224 \
   --epochs 15 --batch-size 32 --balanced-loss
@@ -40,7 +49,7 @@ diff.
 conda run -n closure python /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/quantize_siglip2.py \
   --checkpoint "$HOME/siglip2-runs/person-attribute-2/best.pt" \
   --export-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/person-attribute-2 \
-  --config /home/me/disk-256/00_RND_MODELS/paddlepaddle/dataset-collector/server/template/siglip2/siglip2_person_attribute/config.yaml \
+  --config /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/person-attribute-2/config.yaml \
   --output-dir "$HOME/siglip2-runs/person-attribute-2-quant" \
   --mode fp16
 ```
