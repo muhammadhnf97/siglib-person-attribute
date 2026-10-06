@@ -2,7 +2,7 @@
 
 Fine-tunes a SigLIP2 vision backbone with one linear head per attribute
 group, for any `siglip2/*` template in the collector (e.g.
-`siglip2_gender_age`, `siglip2_person_attribute`). See
+`siglip2_person_attribute`). See
 `train_siglip2_attributes.py` and `quantize_siglip2.py` for full `--help`.
 
 Run everything inside the `closure` conda env. Checkpoints are ~350MB
@@ -14,7 +14,7 @@ of space easily.
 ```bash
 conda run -n closure python /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/train_siglip2_attributes.py \
   --export-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/gender-age-1 \
-  --config /home/me/disk-256/00_RND_MODELS/paddlepaddle/dataset-collector/server/template/siglip2/siglip2_gender_age/config.yaml \
+  --config /home/me/disk-256/00_RND_MODELS/paddlepaddle/dataset-collector/server/template/siglip2/siglip2_person_attribute/config.yaml \
   --output-dir "$HOME/siglip2-runs/gender-age-2" \
   --checkpoint google/siglip2-base-patch16-224 \
   --epochs 15 --batch-size 32 --balanced-loss
@@ -40,7 +40,7 @@ diff.
 conda run -n closure python /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/quantize_siglip2.py \
   --checkpoint "$HOME/siglip2-runs/gender-age-2/best.pt" \
   --export-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/gender-age-1 \
-  --config /home/me/disk-256/00_RND_MODELS/paddlepaddle/dataset-collector/server/template/siglip2/siglip2_gender_age/config.yaml \
+  --config /home/me/disk-256/00_RND_MODELS/paddlepaddle/dataset-collector/server/template/siglip2/siglip2_person_attribute/config.yaml \
   --output-dir "$HOME/siglip2-runs/gender-age-2-quant" \
   --mode fp16
 ```

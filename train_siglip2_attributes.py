@@ -4,7 +4,7 @@
 Trains one linear head per attribute group (Head, Upper, Sleeve, Lower, Bag,
 Shoes, View, Age, Gender, ... — whatever groups the template's config.yaml
 defines) on top of a shared SigLIP2 vision tower. Works for any siglip2/*
-template (e.g. siglip2_person_attribute, siglip2_gender_age) since the group
+template (e.g. siglip2_person_attribute) since the group
 list is read from the template's config.yaml rather than hard-coded.
 
 Expects a dataset exported from the collector in the `metadata_jsonl` layout:
