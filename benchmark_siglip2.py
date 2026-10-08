@@ -56,7 +56,7 @@ def find_models(model_dir: Path) -> list[Path]:
         return [model_dir]
     ckpt_files = [
         model_dir / n
-        for n in ("best.pt", "fp16.pt", "int8-dynamic.pt")
+        for n in ("best.pt", "fp16.pt", "int8-dynamic.pt", "int8-torchao.pt")
         if (model_dir / n).is_file()
     ]
     if not ckpt_files and (model_dir / "last.pt").is_file():

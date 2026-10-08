@@ -71,7 +71,12 @@ def load_predictor(model_path: Path):
             f"No checkpoint ({'/'.join(CHECKPOINT_NAMES)}) found in {model_path}"
         )
 
-    ckpt = torch.load(ckpt_path, map_location="cpu")
+    try:
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+    except Exception:
+        # torchao checkpoints serialize tensor subclasses that the default
+        # weights_only=True unpickler rejects — retry with it off.
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     base_checkpoint = ckpt.get("checkpoint")
     groups = ckpt.get("groups") or []
     if not base_checkpoint or not groups:
@@ -88,6 +93,15 @@ def load_predictor(model_path: Path):
                 model, {nn.Linear}, dtype=torch.qint8
             )
         device = torch.device("cpu")
+    elif quantization == "int8-torchao":
+        # Rebuild the quantized module structure (int8 Linear subclasses)
+        # before loading weights; runs real int8 matmul kernels on CUDA.
+        from torchao.quantization import (
+            Int8DynamicActivationInt8WeightConfig,
+            quantize_,
+        )
+        quantize_(model, Int8DynamicActivationInt8WeightConfig())
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
         if quantization == "fp16":
             model = model.half()

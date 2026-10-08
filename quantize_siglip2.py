@@ -18,6 +18,16 @@ Two independent modes:
       mode always evaluates/runs on CPU regardless of GPU availability. Only
       useful if inference is actually moving off the GPU.
 
+  --mode int8-torchao
+      torchao Int8DynamicActivationInt8WeightConfig — int8 weights plus
+      int8 activations quantized on the fly, executed with REAL int8 matmul
+      kernels on CUDA Tensor Cores (verified working on sm86/RTX 3080).
+      Unlike int8-dynamic this mode runs on GPU. Requires torchao installed
+      (pip install torchao) AND at inference load time — the saved
+      state_dict contains torchao tensor subclasses, so anything loading the
+      checkpoint needs torchao present. Apply torch.compile at serve time
+      for the full speed benefit.
+
 Always evaluates the ORIGINAL float32 checkpoint and the converted one on the
 same test split (when --export-dir/--config are given) so the accuracy
 tradeoff is measured, not assumed, before you decide whether to ship it.
@@ -107,7 +117,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--checkpoint", required=True, type=Path, help="Trained best.pt/last.pt from train_siglip2_attributes.py")
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--mode", choices=["fp16", "int8-dynamic"], required=True)
+    parser.add_argument("--mode", choices=["fp16", "int8-dynamic", "int8-torchao"], required=True)
     parser.add_argument("--export-dir", type=Path, default=None, help="Dataset export dir, for before/after eval on --test-dir")
     parser.add_argument("--config", type=Path, default=None, help="Template config.yaml, for before/after eval")
     parser.add_argument("--test-dir", default="test")
@@ -144,7 +154,7 @@ def main():
         quant_model = copy.deepcopy(model).half()
         eval_device = device
         quant_model.to(eval_device)
-    else:  # int8-dynamic
+    elif args.mode == "int8-dynamic":
         # torch.quantization.quantize_dynamic is deprecated in favor of
         # torchao as of this torch version, but still functional and avoids
         # an extra dependency for one call — revisit if it's actually
@@ -156,6 +166,15 @@ def main():
                 cpu_model, {nn.Linear}, dtype=torch.qint8,
             )
         eval_device = torch.device("cpu")
+    else:  # int8-torchao
+        from torchao.quantization import (
+            Int8DynamicActivationInt8WeightConfig,
+            quantize_,
+        )
+        quant_model = copy.deepcopy(model)
+        quantize_(quant_model, Int8DynamicActivationInt8WeightConfig())
+        eval_device = device
+        quant_model.to(eval_device)
 
     out_ckpt = {
         "model_state": quant_model.state_dict(),
