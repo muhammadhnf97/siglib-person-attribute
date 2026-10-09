@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Post-training convert a checkpoint from train_siglip2_attributes.py to a
+"""Post-training convert a checkpoint from train.py to a
 smaller/faster dtype, and measure exactly what it costs in accuracy.
 
 Two independent modes:
@@ -34,7 +34,7 @@ tradeoff is measured, not assumed, before you decide whether to ship it.
 
 Usage (run inside the `closure` conda env):
 
-    conda run -n closure python quantize_siglip2.py \\
+    conda run -n closure python quantize.py \\
         --checkpoint /path/to/best.pt \\
         --export-dir /path/to/dataset/export \\
         --config /path/to/export/config.yaml \\
@@ -53,7 +53,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from transformers import AutoImageProcessor
 
-from train_siglip2_attributes import (
+from train import (
     IGNORE_INDEX,
     AttributeGroup,
     AttributeJsonlDataset,
@@ -115,7 +115,7 @@ def print_accuracy(label: str, groups, acc, macro):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--checkpoint", required=True, type=Path, help="Trained best.pt/last.pt from train_siglip2_attributes.py")
+    parser.add_argument("--checkpoint", required=True, type=Path, help="Trained best.pt/last.pt from train.py")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--mode", choices=["fp16", "int8-dynamic", "int8-torchao"], required=True)
     parser.add_argument("--export-dir", type=Path, default=None, help="Dataset export dir, for before/after eval on --test-dir")

@@ -2,10 +2,11 @@
 """Compile model.onnx into a TensorRT engine for this machine's GPU.
 
   --precision fp16   fp16 Tensor Core kernels, no calibration needed.
-                     Good first build — verifies the whole pipeline works.
+                     TRT 11 is strongly typed (no FP16 builder flag), so
+                     the ONNX is first cast to fp16 dtypes via ONNX
+                     Runtime's float16 converter, then compiled.
 
-  --precision int8   int8 Tensor Core kernels. TRT 11 dropped the old
-                     IInt8Calibrator API, so this is two stages:
+  --precision int8   int8 Tensor Core kernels. Two stages:
                        1. ONNX Runtime static-quantizes model.onnx with
                           real calibration images (--calib-dir), baking
                           QuantizeLinear/DequantizeLinear nodes + scales
@@ -18,12 +19,12 @@ changes.
 
 Usage (run inside the `closure` conda env):
 
-    conda run -n closure python build_engine.py \
+    conda run -n closure python deploy.py \
         --onnx siglip2-runs/person-attribute-2/model.onnx \
         --output siglip2-runs/person-attribute-2/model_fp16.engine \
         --precision fp16
 
-    conda run -n closure python build_engine.py \
+    conda run -n closure python deploy.py \
         --onnx siglip2-runs/person-attribute-2/model.onnx \
         --output siglip2-runs/person-attribute-2/model_int8.engine \
         --precision int8 \
@@ -35,12 +36,10 @@ import argparse
 from pathlib import Path
 
 import numpy as np
-import tensorrt as trt
 from PIL import Image
 from transformers import AutoImageProcessor
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-LOG = trt.Logger(trt.Logger.INFO)
 
 
 def quantize_onnx_int8(onnx_path: Path, qdq_path: Path, calib_dir: Path,
@@ -48,6 +47,7 @@ def quantize_onnx_int8(onnx_path: Path, qdq_path: Path, calib_dir: Path,
     """Produce a QDQ int8 ONNX via ONNX Runtime static quantization."""
     from onnxruntime.quantization import (
         CalibrationDataReader,
+        QuantFormat,
         QuantType,
         quantize_static,
     )
@@ -75,22 +75,41 @@ def quantize_onnx_int8(onnx_path: Path, qdq_path: Path, calib_dir: Path,
         model_input=str(onnx_path),
         model_output=str(qdq_path),
         calibration_data_reader=Reader(),
-        quant_format=__import__(
-            "onnxruntime.quantization", fromlist=["QuantFormat"]
-        ).QuantFormat.QDQ,
+        quant_format=QuantFormat.QDQ,
         activation_type=QuantType.QInt8,
         weight_type=QuantType.QInt8,
         per_channel=True,
-        op_types_to_quantize=["MatMul", "Gemm", "Conv"],
+        # MatMul only — TRT rejects the int32 DequantizeLinear that ORT
+        # emits on Conv/Gemm biases. MatMuls are ~95% of ViT compute
+        # anyway; heads/patch-embed stay unquantized.
+        op_types_to_quantize=["MatMul"],
         extra_options={"ActivationSymmetric": True, "WeightSymmetric": True},
     )
     print(f"QDQ model saved: {qdq_path}")
 
 
-def build(onnx_path: Path, output: Path, fp16: bool, int8: bool):
-    builder = trt.Builder(LOG)
+def cast_onnx_fp16(onnx_path: Path, fp16_path: Path):
+    """Cast a float32 ONNX to fp16 for TRT 11's strongly-typed builder."""
+    import onnx
+    from onnxruntime.transformers.float16 import convert_float_to_float16
+
+    model = onnx.load(str(onnx_path))
+    fp16_model = convert_float_to_float16(
+        model, keep_io_types=True, disable_shape_infer=True
+    )
+    onnx.save(fp16_model, str(fp16_path))
+    print(f"fp16 ONNX saved: {fp16_path}")
+
+
+def build(onnx_path: Path, output: Path):
+    try:
+        import tensorrt as trt
+    except ImportError:
+        raise SystemExit("tensorrt not installed — pip install tensorrt")
+    log = trt.Logger(trt.Logger.INFO)
+    builder = trt.Builder(log)
     network = builder.create_network()  # TRT >= 10: explicit batch is implicit
-    parser = trt.OnnxParser(network, LOG)
+    parser = trt.OnnxParser(network, log)
     if not parser.parse_from_file(str(onnx_path)):
         for i in range(parser.num_errors):
             print(parser.get_error(i))
@@ -99,11 +118,18 @@ def build(onnx_path: Path, output: Path, fp16: bool, int8: bool):
 
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
-    if fp16:
-        config.set_flag(trt.BuilderFlag.FP16)
-    if int8:
-        config.set_flag(trt.BuilderFlag.INT8)
-        config.set_flag(trt.BuilderFlag.FP16)  # fallback for non-quantized ops
+
+    # The ONNX exports with a dynamic batch dim — TRT requires an
+    # optimization profile to resolve it. Fixed at batch=1 (collector
+    # inference is per-image).
+    profile = builder.create_optimization_profile()
+    inp = network.get_input(0)
+    shape = list(inp.shape)
+    if any(d < 0 for d in shape):
+        min_shape = [1 if d < 0 else d for d in shape]
+        profile.set_shape(inp.name, min_shape, min_shape, min_shape)
+        config.add_optimization_profile(profile)
+        print(f"optimization profile: {inp.name} fixed at {min_shape}")
 
     print("building engine (this takes a few minutes)...")
     engine = builder.build_serialized_network(network, config)
@@ -134,9 +160,11 @@ def main():
             args.onnx, qdq_path, args.calib_dir, args.calib_num,
             args.base_checkpoint,
         )
-        build(qdq_path, args.output, fp16=True, int8=True)
+        build(qdq_path, args.output)
     else:
-        build(args.onnx, args.output, fp16=True, int8=False)
+        fp16_path = args.output.with_suffix(".fp16.onnx")
+        cast_onnx_fp16(args.onnx, fp16_path)
+        build(fp16_path, args.output)
 
 
 if __name__ == "__main__":

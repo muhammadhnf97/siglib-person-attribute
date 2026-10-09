@@ -1,0 +1,8 @@
+# Extra deps for export_onnx.py / deploy.py and the .onnx + .engine
+# backends in predict.py / benchmark.py. GPU box only.
+# Install with: pip install -r requirements-deploy.txt
+onnx>=1.17
+onnxruntime-gpu>=1.23   # falls back to onnxruntime on CPU-only boxes
+onnxscript>=0.7         # required by torch 2.14's dynamo ONNX exporter
+torchao>=0.18           # int8-torchao quantization mode (optional)
+tensorrt>=11.3          # .engine build + inference (optional, NVIDIA only)

@@ -1,5 +1,5 @@
 """Inference helper for SigLIP2 multi-attribute checkpoints produced by
-`train_siglip2_attributes.py` / `quantize_siglip2.py` in this directory.
+`train.py` / `quantize.py` in this directory.
 
 Self-contained copy of the equivalent helper in the dataset-collector server
 — this directory must not depend on dataset-collector code. Only needs
@@ -19,7 +19,8 @@ import torch.nn as nn
 from PIL import Image
 from transformers import AutoImageProcessor, AutoModel
 
-CHECKPOINT_NAMES = ("best.pt", "last.pt", "fp16.pt", "int8-dynamic.pt")
+CHECKPOINT_NAMES = ("best.pt", "last.pt", "fp16.pt", "int8-dynamic.pt",
+                    "int8-torchao.pt")
 
 
 class Siglip2AttributeModel(nn.Module):
@@ -60,7 +61,7 @@ def load_predictor(model_path: Path):
     `model_path` may be a directory holding a checkpoint file or a direct
     path to a .pt file.
 
-    Handles quantization metadata written by quantize_siglip2.py: "fp16" casts
+    Handles quantization metadata written by quantize.py: "fp16" casts
     the model before loading, "int8-dynamic" rebuilds the quantized module
     structure (packed Linear params) and runs on CPU since those kernels have
     no GPU backend. Checkpoints without a "quantization" field are float32.

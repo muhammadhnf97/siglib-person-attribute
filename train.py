@@ -19,7 +19,7 @@ with group names/options lowercased, matching the collector's export format.
 
 Usage (run inside the `closure` conda env):
 
-    conda run -n closure python train_siglip2_attributes.py \\
+    conda run -n closure python train.py \\
         --export-dir /path/to/dataset/export \\
         --config /path/to/export/config.yaml \\
         --output-dir /path/to/runs/person_attribute \\

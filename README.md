@@ -1,95 +1,170 @@
-# SigLIP2 multi-attribute training
+# SigLIP2 multi-attribute pipeline
 
 Fine-tunes a SigLIP2 vision backbone with one linear head per attribute
 group, for any `siglip2/*` template in the collector (e.g.
-`siglip2_person_attribute`). See
-`train_siglip2_attributes.py` and `quantize_siglip2.py` for full `--help`.
+`siglip2_person_attribute`), then quantizes / exports / compiles it for
+deployment. Playground repo — one script per pipeline stage, no packaging.
 
-Run everything inside the `closure` conda env. Checkpoints are ~350MB
-(float32) — point `--output-dir` at `$HOME`, not `disk-256`, which runs out
-of space easily.
+## Pipeline
 
-`--config` tells the script which attribute groups to build heads for (names,
-option lists, how many classes each head has) — it's required, both scripts
-fail fast without it. The collector's `/datasets/{name}/export` now bundles
-the exact `config.yaml` that produced the export's `metadata.jsonl` labels
-right inside the export dir, so point `--config` at `<export-dir>/config.yaml`
-rather than back into `dataset-collector/server/template/...` — that way
-training always matches the config an export was actually made with, even if
-the live template gets edited later.
+```
+dataset export          train.py          quantize.py         deploy.py
+(dir + config.yaml) ──► best.pt ──┬──► fp16 / int8 .pt        .onnx ──► .engine
+                                  │     (torch)               (tensorrt)
+                                  ├──► export_onnx.py
+                                  │      model.onnx
+                                  ▼
+                            predict.py / benchmark.py
+                            (.pt / .onnx / .engine — auto-detected)
+```
+
+Every stage's output feeds the next; `predict.py` and `benchmark.py` work on
+any of the artifacts.
+
+| File | Stage | Key deps |
+|---|---|---|
+| `train.py` | dataset export → `best.pt` | torch, transformers, pyyaml |
+| `quantize.py` | `best.pt` → fp16/int8 `.pt` | torchao for `int8-torchao` |
+| `export_onnx.py` | `best.pt` → `model.onnx` | onnx, onnxscript |
+| `deploy.py` | `.onnx` → `.engine` | tensorrt (NVIDIA only) |
+| `siglip2_infer.py` | shared .pt loader (library, not CLI) | torch |
+| `predict.py` | run any model on images, score vs `metadata.jsonl` | per-backend |
+| `benchmark.py` | latency/throughput for any model | per-backend |
+
+Vendor deps are imported lazily — `predict.py`/`benchmark.py` pick a backend
+from the file extension and only import what that backend needs, so the repo
+still works on machines without CUDA/TensorRT (`.pt` CPU and `.onnx` ORT-CPU
+paths included).
+
+Install deps per stage:
+
+```bash
+pip install -r requirements-train.txt    # train / quantize / predict .pt
+pip install -r requirements-deploy.txt   # + onnx export, engines, torchao
+```
 
 ## Train
 
+`--config` tells the script which attribute groups to build heads for (names,
+option lists, classes per head) — required. The collector's
+`/datasets/{name}/export` bundles the exact `config.yaml` that produced the
+export's `metadata.jsonl` inside the export dir; point `--config` at
+`<export-dir>/config.yaml` so training always matches the labels, even if
+the live template gets edited later.
+
 ```bash
-conda run -n closure python /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/train_siglip2_attributes.py \
-  --export-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/person-attribute-2 \
-  --config /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/person-attribute-2/config.yaml \
-  --output-dir "$HOME/siglip2-runs/person-attribute-2" \
+conda run -n closure python train.py \
+  --export-dir person-attribute-2 \
+  --config person-attribute-2/config.yaml \
+  --output-dir siglip2-runs/person-attribute-2 \
   --checkpoint google/siglip2-base-patch16-224 \
   --epochs 15 --batch-size 32 --balanced-loss
 ```
 
-Defaults are tuned to avoid collapsing the shared backbone on small/imbalanced
-datasets: `--lr 2e-5`, `--freeze-backbone-epochs 2` (head warm-up before the
-backbone unfreezes), and `--balanced-loss` caps any single class's weight at
-`--max-class-weight` (default `10x`) so a near-absent class (e.g. 4 "kid"
-images out of 546) can't destabilize training. If `best_macro_acc` lands
-suspiciously close to the dataset's majority-class ratio, the model likely
-collapsed — check per-head accuracy, not just the macro average.
+Defaults are tuned to avoid collapsing the shared backbone on small/
+imbalanced datasets: `--lr 2e-5`, `--freeze-backbone-epochs 2` (head warm-up
+before the backbone unfreezes), and `--balanced-loss` caps any single
+class's weight at `--max-class-weight` (default `10x`) so a near-absent
+class can't destabilize training. If `best_macro_acc` lands suspiciously
+close to the dataset's majority-class ratio, the model likely collapsed —
+check per-head accuracy, not just the macro average.
 
 Outputs `best.pt`, `last.pt`, and `labels.json` in `--output-dir`.
+Checkpoints are ~350MB (float32) — disk-256 fills up easily, check
+`df -h /home/me/disk-256` and `md5sum` after copying.
 
-## Quantize (optional)
+## Quantize to .pt (optional)
 
-Always measures baseline vs. converted accuracy on the same test split before
-you decide whether to ship it — never trust a quantized model without that
-diff.
+Measures baseline vs converted accuracy on the same test split — never ship
+a quantized model without that diff.
 
 ```bash
-conda run -n closure python /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/quantize_siglip2.py \
-  --checkpoint /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/siglip2-runs/person-attribute-2/best.pt \
-  --export-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/person-attribute-2 \
-  --config /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/person-attribute-2/config.yaml \
-  --output-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/siglip2-runs/person-attribute-2-quant \
+conda run -n closure python quantize.py \
+  --checkpoint siglip2-runs/person-attribute-2/best.pt \
+  --export-dir person-attribute-2 \
+  --config person-attribute-2/config.yaml \
+  --output-dir siglip2-runs/person-attribute-2-quant \
   --mode fp16
 ```
 
-- `--mode fp16`: 2x smaller, same GPU, effectively no accuracy cost. Default
-  choice when serving stays on this machine's GPU.
-- `--mode int8-dynamic`: ~3.5x smaller, CPU-only (PyTorch's dynamic-quant
-  kernels have no GPU backend), small accuracy cost — only worth it if
-  inference is moving off the GPU.
+- `fp16`: 2x smaller, same GPU, no measurable accuracy cost. Default for
+  this machine.
+- `int8-dynamic`: ~3.5x smaller, **CPU only** (PyTorch dynamic-quant kernels
+  have no GPU backend) — only for CPU serving.
+- `int8-torchao`: int8 weights + activations, real int8 matmul kernels on
+  CUDA Tensor Cores (needs `pip install torchao`; fast path requires
+  `torch.compile` at load time — eager int8 is slower than fp16).
 
-## Benchmark (latency / stress test)
-
-Times the same code path `/prelabel` runs (load, preprocess, forward, argmax)
-— works on float32, fp16, and int8-dynamic checkpoints. `--images-dir` is just
-a source of real images to feed the model (labels are ignored; it cycles if
-the folder is smaller than `--num-images` — point it at a real batch for a
-representative run). Prints per-image latency stats, per-chunk throughput so
-you can spot degradation under sustained load, peak VRAM, and a wall-clock
-projection for `--project` images (default 10k).
+## Export to ONNX
 
 ```bash
-conda run -n closure python /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/benchmark_siglip2.py \
-  --model-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/siglip2-runs/person-attribute-2-quant \
-  --images-dir /home/me/disk-256/00_RND_MODELS/paddlepaddle/siglip2/person-attribute-2/test \
-  --num-images 300
+conda run -n closure python export_onnx.py \
+  --checkpoint siglip2-runs/person-attribute-2 \
+  --output siglip2-runs/person-attribute-2/model.onnx \
+  --verify-image person-attribute-2/test/020001.jpg
 ```
 
-Measured on this machine (RTX 3080): fp16 ~11ms/img ≈ 89 img/s (~2min per
-10k images); int8-dynamic ~110ms/img ≈ 9 img/s (~18min per 10k) since it
-runs on CPU.
+Self-contained single file (weights embedded), all heads as named outputs.
+`--verify-image` runs a torch-vs-ORT parity check on a real image.
+
+## Compile to TensorRT engine (NVIDIA)
+
+```bash
+conda run -n closure python deploy.py \
+  --onnx siglip2-runs/person-attribute-2/model.onnx \
+  --output siglip2-runs/person-attribute-2/model_fp16.engine \
+  --precision fp16
+
+conda run -n closure python deploy.py \
+  --onnx siglip2-runs/person-attribute-2/model.onnx \
+  --output siglip2-runs/person-attribute-2/model_int8.engine \
+  --precision int8 \
+  --calib-dir person-attribute-2/test --calib-num 64
+```
+
+`fp16` casts the ONNX then compiles (no calibration). `int8` runs ONNX
+Runtime static quantization with real calibration images first (QDQ graph),
+then compiles — MatMul-only quantization since TRT rejects int32 DQ nodes
+on Conv/Gemm biases. Engines are GPU/driver/TRT-version-locked — rebuild
+on a new machine. TRT 11 is strongly typed: precision comes from the graph
+itself, not builder flags.
+
+## Predict & evaluate
+
+```bash
+conda run -n closure python predict.py \
+  --model siglip2-runs/person-attribute-2/model_int8.engine \
+  --data-dir person-attribute-2/test
+```
+
+Works with `.pt`, `.onnx`, `.engine` (or a dir holding a checkpoint). If the
+dir has `metadata.jsonl` it prints per-head accuracy + a confusion summary;
+`--show-all` prints every prediction; `--num-images N` cycles for timing
+without scoring. Option names come from `labels.json` next to the model —
+keep it beside the artifact when copying.
+
+## Benchmark
+
+```bash
+conda run -n closure python benchmark.py \
+  --model siglip2-runs/person-attribute-2-quant \
+  --data-dir person-attribute-2/test --num-images 300
+```
+
+A dir benchmarks every runnable artifact inside it and prints a comparison
+table; a single file benchmarks just that one. Prints per-chunk throughput
+(watch for throttle under sustained load), p50/p95/p99 latency, peak VRAM,
+and a wall-clock projection for `--project` images.
+
+Measured on this machine (RTX 3080, batch=1): fp16.pt ~86 img/s,
+model_int8.engine ~262 img/s, int8-dynamic.pt (CPU) ~11 img/s.
 
 ## Deploying to the collector for prelabeling
 
-1. Copy `best.pt` (or the quantized `fp16.pt`/`int8-dynamic.pt`, renamed to
-   `best.pt`) into
+1. Copy `best.pt` (or a quantized `.pt` renamed to `best.pt`) into
    `dataset-collector/server/template/siglip2/<template>/model/<name>/`.
 2. Point that template's `config.yaml` `pre-label-model` at `model/<name>`,
    or pass `"model": "model/<name>"` in the `/datasets/{name}/prelabel`
    request body.
-3. `disk-256` fills up fast — `df -h /home/me/disk-256` before copying a new
-   checkpoint there, and `md5sum` the source/destination after copying to
-   catch a truncated copy (silent on a full disk) before it causes a 500 at
-   prelabel time.
+3. The collector only loads `.pt` today — `.onnx`/`.engine` serving would
+   need a new loader path in its inference code.

@@ -11,7 +11,10 @@ jjpetshop-*.tar
 *.webp
 metadata.jsonl
 
-# Training runs / checkpoints
+# Training runs / checkpoints / compiled artifacts
 siglip2-runs/
 *.pt
 *.onnx
+*.engine
+*.calib
+*.profile
