@@ -70,6 +70,7 @@ class AttributeGroup:
     name: str
     alias: str
     options: list[str]
+    type: str = "single"  # "single" (softmax/CE) or "multi" (independent bits/BCE)
 
     @property
     def key(self) -> str:
@@ -89,6 +90,7 @@ def load_attribute_groups(config_path: Path) -> list[AttributeGroup]:
                 name=g["name"],
                 alias=g.get("alias", g["name"]),
                 options=list(g.get("options", [])),
+                type=g.get("type", "single"),
             )
         )
     if not groups:
@@ -122,6 +124,21 @@ class AttributeJsonlDataset(Dataset):
         labels = {}
         for group in self.groups:
             raw = rec.get(group.key)
+            if group.type == "multi":
+                # Export writes a list of option names; [] is a real "none
+                # present" label, null/None means unannotated → ignored.
+                # A bare string is tolerated as a single-option list.
+                if raw is None:
+                    labels[group.key] = None
+                    continue
+                opts = raw if isinstance(raw, list) else [raw]
+                vec = [0.0] * len(group.options)
+                for opt in opts:
+                    label_id = group.label2id.get(str(opt).lower())
+                    if label_id is not None:
+                        vec[label_id] = 1.0
+                labels[group.key] = vec
+                continue
             if raw is None:
                 labels[group.key] = IGNORE_INDEX
                 continue
@@ -137,10 +154,18 @@ class AttributeJsonlDataset(Dataset):
 
 def collate(batch, groups: list[AttributeGroup]):
     pixel_values = torch.stack([b[0] for b in batch])
-    labels = {
-        group.key: torch.tensor([b[1][group.key] for b in batch], dtype=torch.long)
-        for group in groups
-    }
+    labels = {}
+    for group in groups:
+        vals = [b[1][group.key] for b in batch]
+        if group.type == "multi":
+            # None marks an unannotated row — encoded as all -1 so the loss
+            # can mask it, distinct from a valid all-zero "none present" row.
+            labels[group.key] = torch.tensor(
+                [v if v is not None else [IGNORE_INDEX] * len(group.options) for v in vals],
+                dtype=torch.float32,
+            )
+        else:
+            labels[group.key] = torch.tensor(vals, dtype=torch.long)
     return pixel_values, labels
 
 
@@ -172,13 +197,35 @@ def class_weights_for_group(
     dataset: AttributeJsonlDataset, group: AttributeGroup, max_weight: float = 10.0
 ) -> torch.Tensor:
     counts = torch.zeros(len(group.options))
+    n_labeled = 0
     for rec in dataset.records:
         raw = rec.get(group.key)
         if raw is None:
             continue
-        idx = group.label2id.get(str(raw).lower())
-        if idx is not None:
-            counts[idx] += 1
+        n_labeled += 1
+        opts = raw if isinstance(raw, list) else [raw]
+        for opt in opts:
+            idx = group.label2id.get(str(opt).lower())
+            if idx is not None:
+                counts[idx] += 1
+    if group.type == "multi":
+        # BCE pos_weight: neg/pos ratio per bit, so rare positives like a
+        # seldom-seen bag type outweigh the dominant negative. Empty option
+        # stays 1.0 — there's nothing to rebalance.
+        if n_labeled == 0:
+            return torch.ones(len(group.options))
+        pos = counts
+        neg = n_labeled - pos
+        weights = (neg / pos.clamp(min=1)).clamp(min=1.0, max=max_weight)
+        weights[pos == 0] = 1.0
+        rare = (pos > 0) & (pos < n_labeled / 50)
+        if rare.any():
+            names = ", ".join(group.options[i] for i in rare.nonzero(as_tuple=True)[0].tolist())
+            print(
+                f"  [warn] {group.alias}: rare positive bit(s) {names} "
+                f"(n<={int(pos[rare].max())} positive samples) — consider collecting more examples"
+            )
+        return weights
     total = counts.sum()
     if total == 0:
         return torch.ones(len(group.options))
@@ -222,6 +269,19 @@ def run_epoch(
                 batch_loss = None
                 for group in groups:
                     target = labels[group.key]
+                    if group.type == "multi":
+                        mask = target[:, 0] != IGNORE_INDEX
+                        if not mask.any():
+                            continue
+                        weight = loss_weights[group.key].to(device) if loss_weights else None
+                        head_loss = nn.functional.binary_cross_entropy_with_logits(
+                            logits[group.key][mask], target[mask], pos_weight=weight
+                        )
+                        batch_loss = head_loss if batch_loss is None else batch_loss + head_loss
+                        preds = (torch.sigmoid(logits[group.key][mask]) >= 0.5)
+                        correct[group.key] += int((preds == target[mask].bool()).all(dim=-1).sum())
+                        totals[group.key] += int(mask.sum())
+                        continue
                     mask = target != IGNORE_INDEX
                     if not mask.any():
                         continue
@@ -335,7 +395,7 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     labels_path = args.output_dir / "labels.json"
     labels_path.write_text(json.dumps(
-        {g.key: {"alias": g.alias, "options": g.options} for g in groups}, indent=2, ensure_ascii=False
+        {g.key: {"alias": g.alias, "options": g.options, "type": g.type} for g in groups}, indent=2, ensure_ascii=False
     ))
 
     optimizer = torch.optim.AdamW(
@@ -367,7 +427,7 @@ def main():
             "checkpoint": args.checkpoint,
             "epoch": epoch + 1,
             "best_macro_acc": max(best_macro_acc, val_macro),
-            "groups": [{"name": g.name, "alias": g.alias, "options": g.options} for g in groups],
+            "groups": [{"name": g.name, "alias": g.alias, "options": g.options, "type": g.type} for g in groups],
         }
         torch.save(ckpt, args.output_dir / "last.pt")
         if val_macro > best_macro_acc:

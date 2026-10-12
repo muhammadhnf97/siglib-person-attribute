@@ -150,17 +150,35 @@ def predict_values(image_path: Path, predictor, attr_groups: list[dict]) -> list
         if not ckpt_group:
             continue
 
+        config_options = [str(o).lower() for o in group.get("options", [])]
+        indices = group.get("indices") or []
+        is_multi = group.get("type") == "multi" or ckpt_group.get("type") == "multi"
+
+        if is_multi:
+            # Multi-select groups are trained with per-bit BCE — sigmoid +
+            # threshold picks zero, one, or several options. Old checkpoints
+            # predating multi-label training still land here but their bag
+            # logits were softmax-trained, so results are approximate.
+            probs = torch.sigmoid(logits[key].float()).reshape(-1)
+            for pred_idx in (probs >= 0.5).nonzero(as_tuple=True)[0].tolist():
+                if pred_idx >= len(ckpt_group["options"]):
+                    continue
+                option_name = str(ckpt_group["options"][pred_idx]).lower()
+                if option_name in config_options:
+                    local_idx = config_options.index(option_name)
+                    if local_idx < len(indices):
+                        values[indices[local_idx]] = 1
+            continue
+
         pred_idx = int(logits[key].argmax(dim=-1).item())
         if pred_idx >= len(ckpt_group["options"]):
             continue
         option_name = str(ckpt_group["options"][pred_idx]).lower()
 
-        config_options = [str(o).lower() for o in group.get("options", [])]
         if option_name not in config_options:
             continue
         local_idx = config_options.index(option_name)
 
-        indices = group.get("indices") or []
         if local_idx < len(indices):
             values[indices[local_idx]] = 1
 

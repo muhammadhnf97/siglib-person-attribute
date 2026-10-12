@@ -44,16 +44,25 @@ class PtBackend:
         model, self.processor, groups, self.device = self.predictor
         self.labels = {g["name"].lower(): [str(o).lower() for o in g["options"]]
                        for g in groups}
+        self.group_types = {g["name"].lower(): g.get("type", "single")
+                            for g in groups}
         print(f"backend=torch device={self.device} dtype={next(model.parameters()).dtype}")
 
-    def predict(self, img: Image.Image) -> dict[str, int]:
+    def predict(self, img: Image.Image) -> dict:
         model, processor, _, device = self.predictor
         pv = processor(images=img, return_tensors="pt")["pixel_values"].to(
             device=device, dtype=next(model.parameters()).dtype
         )
         with self.torch.no_grad():
             logits = model(pv)
-        return {k: int(v.argmax(-1).item()) for k, v in logits.items()}
+        return {
+            k: (
+                [i for i in (v.float().sigmoid().reshape(-1) >= 0.5).nonzero().reshape(-1).tolist()]
+                if self.group_types.get(k) == "multi"
+                else int(v.argmax(-1).item())
+            )
+            for k, v in logits.items()
+        }
 
 
 class OnnxBackend:
@@ -65,11 +74,19 @@ class OnnxBackend:
         self.input_name = self.sess.get_inputs()[0].name
         print(f"backend=onnxruntime providers={self.sess.get_providers()}")
 
-    def predict(self, img: Image.Image) -> dict[str, int]:
+    def predict(self, img: Image.Image) -> dict:
         pv = self.processor(images=img, return_tensors="np")["pixel_values"]
         outs = self.sess.run(None, {self.input_name: pv})
         names = [o.name for o in self.sess.get_outputs()]
-        return {n: int(np.asarray(o).argmax(-1).item()) for n, o in zip(names, outs)}
+        result = {}
+        for n, o in zip(names, outs):
+            arr = np.asarray(o).reshape(-1)
+            if getattr(self, "group_types", {}).get(n) == "multi":
+                probs = 1.0 / (1.0 + np.exp(-arr))
+                result[n] = np.nonzero(probs >= 0.5)[0].tolist()
+            else:
+                result[n] = int(arr.argmax())
+        return result
 
 
 class EngineBackend:
@@ -103,21 +120,30 @@ class EngineBackend:
         self.inp.copy_(self.torch.from_numpy(pv).cuda())
         self.ctx.execute_async_v3(self.stream)
         self.torch.cuda.synchronize()
-        return {n: int(t.float().cpu().numpy().reshape(-1).argmax())
-                for n, t in self.outs.items()}
+        result = {}
+        for n, t in self.outs.items():
+            arr = t.float().cpu().numpy().reshape(-1)
+            if getattr(self, "group_types", {}).get(n) == "multi":
+                result[n] = np.nonzero(1.0 / (1.0 + np.exp(-arr)) >= 0.5)[0].tolist()
+            else:
+                result[n] = int(arr.argmax())
+        return result
 
 
 # ------------------------------------------------------------------ driver
-def load_labels(model_path: Path) -> dict[str, list[str]]:
-    """Group name -> lowercase option list. From labels.json next to the
-    model (written by train.py), else a --labels path. Empty if absent."""
+def load_labels(model_path: Path) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Group name -> lowercase option list, and name -> group type. From
+    labels.json next to the model (written by train.py), else a --labels
+    path. Empty dicts if absent."""
     candidates = [model_path.parent / "labels.json"] if model_path.is_file() else []
     for c in candidates:
         if c.is_file():
             data = json.loads(c.read_text())
-            return {k.lower(): [str(o).lower() for o in v["options"]]
-                    for k, v in data.items()}
-    return {}
+            labels = {k.lower(): [str(o).lower() for o in v["options"]]
+                      for k, v in data.items()}
+            types = {k.lower(): v.get("type", "single") for k, v in data.items()}
+            return labels, types
+    return {}, {}
 
 
 def main():
@@ -143,7 +169,10 @@ def main():
     suffix = args.model.suffix.lower() if args.model.is_file() else ".pt"
     backend = {".onnx": OnnxBackend, ".engine": EngineBackend}.get(suffix, PtBackend)(args.model)
 
-    labels = getattr(backend, "labels", None) or load_labels(args.labels or args.model)
+    loaded = load_labels(args.labels or args.model)
+    labels = getattr(backend, "labels", None) or loaded[0]
+    if not hasattr(backend, "group_types"):
+        backend.group_types = loaded[1]
     if not isinstance(backend, PtBackend):
         from transformers import AutoImageProcessor
         backend.processor = AutoImageProcessor.from_pretrained(args.base_checkpoint)
@@ -177,15 +206,37 @@ def main():
                 print(f"  {total:>7} imgs in {el:8.2f}s  ({el / total * 1000:6.2f} ms/img)")
             continue
 
-        preds = {k: (labels.get(k) or [str(v)])[v] for k, v in preds_idx.items()}
+        preds = {}
+        for k, v in preds_idx.items():
+            opts = labels.get(k) or []
+            if isinstance(v, list):
+                preds[k] = sorted(
+                    opts[i] if i < len(opts) else str(i) for i in v
+                )
+            else:
+                preds[k] = opts[v] if v < len(opts) else str(v)
         truth = meta.get(p.name, {})
         mistakes = []
         for k, pred in preds.items():
-            if truth.get(k) == pred:
+            expected = truth.get(k)
+            if isinstance(pred, list):
+                # multi-select truth may be a list (new export) or legacy
+                # scalar string — normalize to a set of names.
+                exp_set = set(expected) if isinstance(expected, list) else (
+                    {expected} if expected else set()
+                )
+                if exp_set == set(pred):
+                    correct[k] += 1
+                else:
+                    mistakes.append(k)
+                    key = (k, str(sorted(exp_set)), str(pred))
+                    confusions[key] = confusions.get(key, 0) + 1
+                continue
+            if expected == pred:
                 correct[k] += 1
             else:
                 mistakes.append(k)
-                key = (k, truth.get(k), pred)
+                key = (k, expected, pred)
                 confusions[key] = confusions.get(key, 0) + 1
         line = f"{p.name}   " + ", ".join(f"{k}: {v}" for k, v in preds.items())
         if mistakes:

@@ -70,7 +70,12 @@ def load_checkpoint(ckpt_path: Path):
         raise ValueError(f"{ckpt_path} is missing 'checkpoint'/'groups' metadata")
 
     groups = [
-        AttributeGroup(name=g["name"], alias=g.get("alias", g["name"]), options=g["options"])
+        AttributeGroup(
+            name=g["name"],
+            alias=g.get("alias", g["name"]),
+            options=g["options"],
+            type=g.get("type", "single"),
+        )
         for g in raw_groups
     ]
     model = MultiAttributeSiglip2(base_checkpoint, groups)
@@ -90,6 +95,14 @@ def evaluate(model, loader, groups, device):
         logits = model(pixel_values)
         for group in groups:
             target = labels[group.key]
+            if group.type == "multi":
+                mask = target[:, 0] != IGNORE_INDEX
+                if not mask.any():
+                    continue
+                preds = (torch.sigmoid(logits[group.key].float()[mask]) >= 0.5)
+                correct[group.key] += int((preds == target[mask].bool()).all(dim=-1).sum())
+                totals[group.key] += int(mask.sum())
+                continue
             mask = target != IGNORE_INDEX
             if not mask.any():
                 continue
