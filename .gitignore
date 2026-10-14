@@ -4,12 +4,19 @@ __pycache__/
 # Datasets / exported splits (dirs holding train/validation/test images)
 gender-age-*/
 person-attribute-*/
-jjpetshop-*.tar
+clustering-img/
+*.tar
 *.jpg
 *.jpeg
 *.png
 *.webp
 metadata.jsonl
+
+# cluster_people.py outputs (wherever they land)
+clusters.json
+clusters_report.*
+clusters_montage/
+.people_embeddings.npz
 
 # Training runs / checkpoints / compiled artifacts
 siglip2-runs/
